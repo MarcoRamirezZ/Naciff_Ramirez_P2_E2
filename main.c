@@ -1,36 +1,16 @@
 /*
- * Copyright 2016-2020 NXP
- * All rights reserved.
+ * Practica 2: Simulacion del protocolo I2S
+ * Marco Antonio Ramirez Zepeda
+ * Jorge Karim Naciff Maldonatt
+ * Sistemas Embebidos Basados en Microcontroladores 2
+ * Edgardo Serna
+ * 16 de mayo del 2020
+ * Instituto Tecnologico y de Estudios Superiores de Occidennte
  *
- * Redistribution and use in source and binary forms, with or without modification,
- * are permitted provided that the following conditions are met:
- *
- * o Redistributions of source code must retain the above copyright notice, this list
- *   of conditions and the following disclaimer.
- *
- * o Redistributions in binary form must reproduce the above copyright notice, this
- *   list of conditions and the following disclaimer in the documentation and/or
- *   other materials provided with the distribution.
- *
- * o Neither the name of NXP Semiconductor, Inc. nor the names of its
- *   contributors may be used to endorse or promote products derived from this
- *   software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
- * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
- 
-/**
- * @file    Practica 2.c
- * @brief   Application entry point.
+ * Notas:
+ * Puerto D bit 12 es SCK
+ * Puerto D bit 13 es WS
+ * Puerto E bit 25 es SD
  */
 #include <stdio.h>
 #include <stdint.h>
@@ -45,16 +25,13 @@
 #include "task.h"
 #include "GPIO.h"
 
-typedef struct
-{
-	uint8_t readyWS;
-	uint8_t readySD;
+uint8_t Word_select = 0;
+uint8_t clock = 0;
+uint8_t first_time = 1;//espera para poder sincronizar con WS
 
-} data_t;
-
-void SCK( void*data );
-void WS( void*data );
-void SD( void*data );
+void SCK( void );
+void WS( void );
+void SD( void );
 
 int main(void) {
 
@@ -78,12 +55,9 @@ int main(void) {
 	GPIO_data_direction_pin( GPIO_D, GPIO_OUTPUT, bit_13 );
 	GPIO_data_direction_pin( GPIO_E, GPIO_OUTPUT, bit_25 );
 
-
-    static data_t sync;
-
-    xTaskCreate(SCK, "SCK", 200, (void*)&sync, 1, NULL );
-    xTaskCreate(WS,  "WS",  200, (void*)&sync, 1, NULL );
-    xTaskCreate(SD,  "SD",  200, (void*)&sync, 1, NULL );
+    xTaskCreate(SCK, "SCK", 200, NULL, 1, NULL );
+    xTaskCreate(WS,  "WS",  200, NULL, 1, NULL );
+    xTaskCreate(SD,  "SD",  200, NULL, 1, NULL );
 
     vTaskStartScheduler();
 
@@ -91,39 +65,36 @@ int main(void) {
     return 0 ;
 }
 
-void SCK( void*data )
+void SCK( void )
 {
-	data_t sync = *((data_t*)data);
-	uint64_t clock = 0;//reloj de salida
 	uint8_t counter = 0;//indicar cambio para word select
 
 	while(1)
 	{
 		clock = ( clock ) ? 0 : 1;//invierte de forma periodica el clock
 		if( clock )
-		{
+		{	//clock = 1
 			GPIO_set_pin(GPIO_D, bit_12);
 		}
 		else
-		{
+		{   //clock = 0
 			GPIO_clear_pin(GPIO_D, bit_12);
+			if ( counter == 8 )
+			{
+				//cada 8 flancos de bajada de clk invierte Word_Select
+				Word_select = ( Word_select ) ? 0 : 1;
+				counter = 0;
+			}
+			counter ++;
 		}
-		if ( counter == 15 )
-		{
-			//cada 8 flancos de clk invierte WS
-			sync.readyWS = !sync.readyWS;
-			counter = 0;
-		}
-		counter ++;
 		vTaskDelay(1);
 	}
 }
-void WS( void*data )
+void WS( void )
 {
-	data_t sync = *((data_t*)data);
-	while(1)
+	while(1)//Word_Select está determinado en el task de clock, se sincroniza para cada 8 flancos de bajada del clock
 	{
-		if( sync.readyWS )
+		if( Word_select )
 		{
 			GPIO_set_pin(GPIO_D, bit_13);
 		}
@@ -135,13 +106,56 @@ void WS( void*data )
 	}
 }
 
-void SD( void*data )
+void SD( void )
 {
-	data_t sync = *((data_t*)data);
-
+	uint8_t buffer[8] = {0};//este buffer tiene la información que se va a enviar por el PTE 25
+	uint8_t data_to_send[10] = {0x00, 0xFF, 0x00, 0xFF, 0x88, 0x15, 0xD3, 0x32, 0x01, 0x10 };//numeros aleatorios para mandar
+	uint8_t i = 0;//Para almacenar en buffer el byte i del arreglo data_to_send
+	uint8_t j = 0;//Para mandar el bit j del buffer
 	while(1)
 	{
-
+		//lenar el buffer para enviar datos, hacer shamt para tener 1 o 0, MSB se manda primero en I2S
+		buffer[0] = ( (data_to_send[i] & 0x80) >> 0x7 );//MSB
+		buffer[1] = ( (data_to_send[i] & 0x40) >> 0x6 );
+		buffer[2] = ( (data_to_send[i] & 0x20) >> 0x5 );
+		buffer[3] = ( (data_to_send[i] & 0x10) >> 0x4 );
+		buffer[4] = ( (data_to_send[i] & 0x08) >> 0x3 );
+		buffer[5] = ( (data_to_send[i] & 0x04) >> 0x2 );
+		buffer[6] = ( (data_to_send[i] & 0x02) >> 0x1 );
+		buffer[7] = data_to_send[i] & 0x01;             //LSB
+		//queremos mandar el buffer antes de volver a llenarlo con la siguiente palabra
+		for( j = 0; j < 8; j++ )
+		{
+			if( !clock )//solo flanco de bajada del clock puede enviar información
+			{
+				if( ( first_time == 1 ))//sincronizate con WS ignorando el primer ciclo del reloj
+				{
+					first_time = 0;
+					j--;
+				}
+				else
+				{
+					if( buffer[j] )//si el dato j que se va a mandar es 1, prender puerto
+					{
+						GPIO_set_pin(GPIO_E, bit_25);
+					}
+					else
+					{
+						GPIO_clear_pin(GPIO_E, bit_25);
+					}
+				}
+			}
+			else
+			{
+				j--;//el ciclo for continua tanto para cuando clock = 1 o 0, queremos que
+					//j sea consistete con el dato del buffer que está mandando entonces
+				    //en los flancos altos de clock, no incrementar j
+			}
+		vTaskDelay(1);
+		}
+		i++;
+		j = 0;
+		i = ( i == 10 ) ? 0 : i;//si i llega a 10, volver a 0 para enviar el dato 0 de nuevo al buffer
 	}
 }
 
